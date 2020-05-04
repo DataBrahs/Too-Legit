@@ -1,0 +1,695 @@
+---
+title: "Too Legit to Colquitt"
+author: Sean and Marc
+date: 2020-05-03
+output: html_document
+description: "15 Years of Incredible Play for the Chiefs Special Teams."
+tags:
+  - sports
+  - nfl
+  - chiefs
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r}
+library(nflfastR)
+library(tidyverse)
+library(nflscrapR)
+library(dplyr)
+library(tidyr)
+library(pins)
+library(lubridate)
+library(ggplot2)
+library(ggimage)
+library(furrr)
+library(ggrepel)
+
+seasons <- 2000:2019
+pbp <- purrr::map_df(seasons, function(x) {
+  readRDS(
+    url(
+      glue::glue("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_{x}.rds")
+    )
+  )
+})
+
+scores <- pbp %>% 
+  arrange(play_id) %>%
+  group_by(game_id) %>%
+  select(game_id, home_team, away_team, posteam_type, total_home_score, 
+         total_away_score, posteam_score_post, defteam_score_post, 
+         score_differential_post) %>%
+  filter(total_home_score == max(total_home_score) &
+           total_away_score == max(total_away_score)) %>%
+  mutate(final_home_score = total_home_score,
+    final_away_score = total_away_score) %>%
+  select(game_id, final_home_score, final_away_score)
+
+scores <- unique(scores[,1:3])
+
+pbp <- left_join(pbp, scores)
+
+# Filter to the most prolific punters
+punt_info <- pbp %>%
+  select(play_id, game_id, home_team, away_team, posteam, posteam_type, yardline_100,
+         game_date, season, season_type, game_seconds_remaining, qtr, down, goal_to_go,
+         total_home_epa, total_away_epa, epa, final_home_score, final_away_score,
+         total_home_score, total_away_score, blocked_player_name, desc,
+         yrdln, ydstogo, play_type, contains('punt'), drive_end_yardline,
+         return_yards, end_yardline_number, end_yardline_side, yards, touchback) %>%
+  filter(play_type == 'punt' & (punt_blocked == 0 | is.na(punt_blocked))) %>%
+  group_by(punter_player_name) %>%
+  filter(n() > 10) %>%
+  mutate(punt_result = case_when(
+    touchback == 1 ~ 'Touchback',
+    punt_blocked == 1 ~ 'Block',
+    punt_inside_twenty == 1 ~ 'Inside 20',
+    TRUE ~ 'Outside 20')) %>%
+  mutate(punt_dist = case_when(
+    yardline_100 > 75 ~ 'Long',
+    yardline_100 > 50 & yardline_100 <= 75 ~ 'Mid',
+    yardline_100 <= 50 ~ 'Short')) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == 'D.Colquitt' ~ 'Colquitt',
+    TRUE ~ 'Others')) %>%
+  mutate(new_axis = paste0(season,' ',is_colquitt)) %>%
+  #filter(yards != 0) %>%
+  mutate(end_yard_100 = yardline_100 - yards) %>%
+  mutate(min_line = case_when(
+    punt_dist == 'Long' ~ 75,
+    punt_dist == 'Mid' ~ 50,
+    punt_dist == 'Short' ~ 25)) %>%
+  mutate(max_line = case_when(
+    punt_dist == 'Long' ~ 100,
+    punt_dist == 'Mid' ~ 75,
+    punt_dist == 'Short' ~ 50)) %>%
+  mutate(yards = case_when(
+    touchback == 1 ~ yardline_100-20,
+    end_yard_100 <= 0 ~ yardline_100-20,
+    TRUE ~ yards
+  )) %>%
+  mutate(punt_yards = case_when(
+    return_yards > 0 ~ yards + return_yards,
+    TRUE ~ yards)) %>%
+  mutate(punt_yard_100 = yardline_100 - punt_yards)
+
+dc_info = punt_info %>%
+  filter(punter_player_name == 'D.Colquitt') %>%
+  mutate(qb_era = case_when(
+    game_date <= '2007-04-30' ~ 'Trent Green',
+    game_date > '2007-04-30' & game_date <= '2009-04-30' ~ 'Brodie Croyle',
+    game_date > '2009-04-30' & game_date <= '2013-04-30' ~ 'Matt Cassel',
+    game_date > '2013-04-30' & game_date <= '2018-04-30' ~ 'Alex Smith',
+    game_date > '2018-04-30' ~ 'Patrick Mahomes'))
+
+roster <- readRDS(url("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/roster-data/roster_1999_to_2019.rds"))
+qb_roster <- c('Trent Green', 'Brodie Croyle', 'Matt Cassel', 'Alex Smith', 'Patrick Mahomes')
+
+
+df_qb <- roster %>%
+  filter(teamPlayers.displayName %in% qb_roster & team.abbr == "KC") %>%
+  select(teamPlayers.displayName,teamPlayers.headshot_url) %>%
+  distinct()
+
+
+brah_info = punt_info %>%
+  filter(punter_player_name %in% c('D.Colquitt', 'B.Colquitt'))
+
+return_prop <- punt_info %>%
+  group_by(punter_player_name) %>%
+  summarize(number = n(), avg_ret_yrds = mean(return_yards)) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "D.Colquitt" ~ "Dustin",
+    T ~ "Others"
+  ))
+
+url.logo <- RCurl::getURL("https://raw.githubusercontent.com/leesharpe/nfldata/master/data/logos.csv")
+df.logos <- read.csv(text = url.logo,stringsAsFactors = F)
+
+df_leverage <- punt_info %>%
+  mutate(posteam = case_when(
+    posteam == "JAC" ~ "JAX",
+    posteam == "LA" ~ "LAR",
+    posteam == "SD" ~ "LAC",
+    posteam == "STL" ~ "LAR",
+    T ~ posteam
+  )) %>%
+  filter(is.na(punter_player_name)==F) %>%
+  filter(game_seconds_remaining <= 120) %>%
+  filter(abs(total_home_score-total_away_score) <=8) %>%
+  mutate(did_win = case_when(
+    posteam_type == "home" & final_home_score > final_away_score ~ "win",
+    posteam_type == "home" & final_home_score < final_away_score ~ "lose",
+    posteam_type == "away" & final_home_score > final_away_score ~ "lose",
+    posteam_type == "away" & final_home_score < final_away_score ~ "win",
+    T~"tie/unk"
+  )) %>%
+  group_by(punter_player_name,did_win,posteam) %>%
+  summarise(number=n()) %>%
+  pivot_wider(names_from = did_win, values_from = number,values_fill = list(number=0)) %>%
+  rowwise() %>%
+  mutate(pct = win/(win+lose+`tie/unk`), number=win+lose+`tie/unk`) %>%
+  left_join(df.logos, by = c("posteam"= "team")) %>%
+  group_by(posteam) %>%
+  filter(number==max(number)) %>%
+  filter(pct == max(pct)) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "D.Colquitt" ~ "D",
+    T ~ "F"
+  ))
+```
+
+## The man, the myth, the legend
+It was a shocking and extremely sad moment when we heard punter Dustin Colquitt was released from the Chiefs.  Through 15 years of highs and lows the Chiefs have always had one constant; stellar special teams play from Colquitt.  We fans knew that we had the best punter in the NFL, but that recognition sometimes seemed lost to the rest of the league.  To provide the proper hype up for our man Dustin, we've done a deep dive into the data to see where he stacks up.  After a Chiefs career perspective, we are going to make the case that Dustin is the best punter of the past 20 years and he is still at the top of his game and has the opportunity to solidify a HoF career.
+
+## By the Numbers
+In 15 years Dustin Colquitt has played in 238 regular season games, 11 Playoff games, and (won!) 1 Super Bowl for a total of 250 games.  He has punted in 249 of those games amassing **1165 punts** for a cumulative distance of **50,761 yards**.  In other words, he's punted in the NFL for **28.8 miles**; or one marathon and a cool down jog.
+
+```{r}
+
+average_punt <- punt_info %>%
+  filter(punter_player_name != 'D.Colquitt') %>%
+  group_by(punter_player_name) %>%
+  filter(n() > 100) %>%
+  summarize(yards=sum(punt_yards)) %>%
+  ungroup() %>%
+  summarise(yards= mean(yards)) %>%
+  mutate(miles= yards/1760)
+
+dust_punt <- punt_info %>%
+  filter(punter_player_name == 'D.Colquitt') %>%
+  summarize(yards = sum(punt_yards)) %>%
+  mutate(miles = yards/1760)
+
+df <- tibble(Thing = c('Indy 500 Track',"Average Punter", 'Nuerburgring CC', 'Marathon', "Dustin's Punts"), 
+             Miles = c(2.5,average_punt$miles, 15.77, 26.1, dust_punt$miles),
+             color = c('grey',"#013369",'grey','grey','#e31837')) 
+
+df$Thing <- factor(df$Thing,levels= c('Indy 500 Track',"Average Punter", 'Nuerburgring CC', 'Marathon', "Dustin's Punts"))
+
+i <- ggplot(data = df)
+
+i + geom_col(aes(x= Thing, y = Miles, fill = color), width = .75) +
+  scale_fill_identity() +
+  scale_x_discrete(limits = df$Thing) +
+  theme_minimal() +
+  theme(legend.position = 'none', axis.title.x = element_blank()) +
+  labs(title="Next Stop, Orbit!",caption = "Min. 100 Punts for Average.",y = "Miles Punted")
+```
+
+With over 1,165 punts, we'll take the time to highlight some of the standouts.
+
+
+**Highest EPA punt - 6 Oct 2013: KC at TEN** - On the first drive of the game, the Chiefs stall out after a series of penalties and must punt on 4th and 25 from KC 38.  Colquitt punts the ball 40 yards and TEN No #17, Damian Williams, muffs the punt while blocking by kicking the ball backwards toward the endzone.  Marcus Cooper recovers the football in the endzone for a Kansas City TOUCHDOWN!
+
+**Highest EPA punt in a Clutch Moment - 30 Dec 2007: KC at NYJ** - The Chiefs are up by 3 points with 20 seconds left in the 4th quarter.  They find themselves at 4th and 13 on KC 26 Yard-Line.  Dustin get's the call, boots it 60 yards where the Chiefs down the ball at the Jets' 14 yardline.  KC holds the Jets and bring home the victory.
+
+**Longest Punt - 31 Dec 2017: KC at DEN** - Chiefs, down by 4, are 4th and 11 at the KC 20 with 6 seconds left in the half.  Dustin pulls out his lead shoes and boots the ball 77 yards where it was downed on the DEN 3 yard line to close out the half.
+
+**Pinned -  15 Oct 2017: PIT at KC** - 5:02 into the second quarter, Chiefs 4th and 6 on Pittsburgh's 44 Dustin punts to the 1 yardline where it was downed.  This was Dustin's 11th and latest career 1 yard pin.
+
+
+Now that we've hit some of the highlights.  Let's dive into the weeds of Dustin's remarkable career as a Kansas City Chief.
+
+
+## I am a Leaf on Wind
+
+When looking at any team, one sees that the organization will develop different styles of play over time. The Chiefs especially have seen drastic changes in their state of play over the past three decades.  In the early 90s they boasted the league's toughest defense, in the 2000s they had the most explosive offense, in the early 2010s they were... "developing", and in the late 2010s they drafted Pat Mahomes in the first round and strapped a rocket ship to their offense to win their first Super Bowl in 50 years.
+
+These play styles have an oversized impact on punter's performances, so when analyzing Dustin's career we wanted to look not only at his personal contributions, but how those changed with the team.  Our first thought when classifying team eras was separating by head coach, as each coach brings a unique approach to the game and is responsible for the use of the punter.  However, when we looked at Dustin's EPA accumulation when different QB's were at the helm, something very interesting happened.
+
+```{r}
+
+
+dfdust1 <- dc_info %>% 
+  select(-final_away_score,-final_home_score) %>%
+  distinct() %>%
+  arrange(game_date) %>%
+  mutate(number=1,punt=cumsum(number),cum_epa=cumsum(epa),avg_epa = cum_epa/punt)
+
+dfdust2 <- dc_info %>%
+  select(-final_away_score,-final_home_score) %>%
+  distinct() %>%
+  group_by(qb_era,game_id) %>%
+  summarise(punts=n()) %>%
+  group_by(qb_era) %>%
+  summarise(`Mean P/G` = mean(punts),`SD P/G` = sd(punts),`Num. Games` = n())
+
+ggplot() +
+  geom_path(data=dfdust1,aes(x=punt, y = cum_epa,color=qb_era,group=qb_era),size=1.5) +
+  geom_smooth(data=dfdust1,aes(x=punt, y = cum_epa,group=qb_era),color="black", method = "lm", se=F,size=1.5) +
+  scale_color_brewer(type="qual",palette = 2,limits=c("Patrick Mahomes","Alex Smith","Matt Cassel","Brodie Croyle","Trent Green")) +
+  theme_minimal() +
+  labs(x = "Career Punts", y = "Cumulative EPA", subtitle = "Colquitt's Cumulative EPA by the Season's Starting QB",
+       title="A Tale of Two Systems",
+       color="Starting QB")
+```
+
+
+The change in punting value appears to be very heavily influenced by the quarterback and, in turn, the style of play.For those unfamiliar with the Expected Points Added stat,EPA tells us the expected points a team will add to their score based on the outcomes of a play.  It's an algorithm that incorporates different factors include a play's resulting down, distance, location, and so on.  EPA has it's issues when evaluating punters [as argued here](https://www.footballperspective.com/punting-value-vs-punting-skill-by-bryan-frye/); but, in general, it is a good metric to evaluate the effectiveness of plays and generally favored by the analytic community.  With a large number of samples increasing EPA is desirable, as it is a cumulative stat with both positive and negative values.
+
+We thought this chart was fascinating looking at Dustin's Cumulative EPA rate while Alex Smith was at the helm of the Chiefs.  With Smith under center, Andy Reid focused the Chiefs' offense on minimizing errors and winning the field position battles.  The "Game Manager".  In this offense, having an elite punter makes a huge difference.  Of note, during the past 20 years the Chiefs' top 3 EPA contributors at the QB/P position (what, your fantasy league doesn't have that?) are 1.) Patrick Mahomes, 2.) Alex Smith, and 3.) Dustin Colquitt.  
+
+With our Chief's play style accounted for, we'll look at Dustin's usage through the QB eras.
+
+```{r}
+dfdust3 <- dfdust2 %>%
+  left_join(df_qb, by = c("qb_era" = "teamPlayers.displayName")) %>%
+  mutate(low = `Mean P/G` - `SD P/G`, high = `Mean P/G` + `SD P/G`)
+
+dfdust3$qb_era <- factor(dfdust3$qb_era ,levels= qb_roster)
+
+ggplot(dfdust3, aes(x=qb_era)) +
+  geom_errorbar(aes(xend=qb_era, ymin = low, ymax = high,group=qb_era,color=qb_era),
+                width = .25 , size=1.5) +
+  geom_image(aes(y=`Mean P/G`, image = teamPlayers.headshot_url),asp=1.55,size=.07) +
+  annotate(x="Patrick Mahomes", y = 1, "text",label= "\"I thought for sure I \nwas going to punt!\"",size=3.5,angle=20) +
+  scale_y_continuous(limits = c(0,8))+#,
+  theme_minimal() +
+  scale_color_brewer(type = "qual", palette = 2) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    legend.position = "none",
+    axis.title.x = element_blank()
+  ) +
+  labs(title= "Get Your Work In! Unless You Have Pat...",subtitle = "Mean and Standard Deviations of Punts per Game by Era",
+       y="Punts")
+```
+The Chiefs punted on average more than 5 times per game in the Croyle and Cassel Eras down to a low of 3 times per game with Patrick Mahomes.  This is about what you'd expect judging from the strength of the Chiefs' offense during these times.  The high punts in the Croyle-Cassel were not due to game managing; mostly just game not-being-very-good-ing.  Just be glad we didn't do a deep dive into the Croyle-Thigpen-Huard metrics! Dark times...
+
+The interesting thing about the Alex Smith era is that the average number of punts went down, but the value of each punt went up when measured by EPA (as shown in the previous chart).  The Chiefs were winning games with a generally conservative offense and well executed special teams play.  This provides more evidence to the value Dustin provided in this game management style.
+
+With Patrick Mahomes and the Legion of Zoom currently shredding defenses, the team begins to use the punter differently.  When the team can score almost on demand from any field position, using a punter to win the positional battle becomes less important to victory.  This shift in strategy results a larger number of designed low EPA punts to defend leads, which likely contributes to Dustin's flattened EPA rate. 
+
+Given his most recent EPA accumulation rate, we need to dig deeper to see if Dustin's still got it. We'll analyze the punt results, or the field position the opposing team begins with after the punt.  As starting distance matters, we've divided all of Dustin's punts into three categories; long range - punts from inside the Chiefs' **25 yard line**, mid range - punts from the Chiefs' **25 yardline to the 50 yardline**, and short range - punts from the **50 yard line to the opposing teams' 25 yard line**.  We then measure the result based on three categories; if the punt and return were **inside the 20 yardline, outside the 20 yardline, or if the punt was a touchback.** 
+
+```{r}
+c <- ggplot(data = dc_info)
+
+c + geom_bar(aes(x = season, fill = punt_result),
+             position = "fill") + 
+  facet_wrap(~punt_dist) +
+  labs(title = 'Consistency and Improvement for a Decade and a Half',
+       fill = "Punt Result", y = '', x = 'Season',
+        caption = "Long - Punts from Own 0-25 Yards, 
+       Mid - Punts from Own 25-50 Yards, 
+       Short - Punts from Opponent's 50-25 Yards") +
+  theme_minimal() +
+  scale_fill_brewer(type = "qual", palette = 3) +
+  theme(axis.text.x = element_text(angle=45, hjust=1), axis.title.y = element_blank(),
+        legend.position = 'bottom', strip.text.y = element_blank())
+```
+
+Dustin has stayed relatively consistent throughout his career.  In fact, you can see that his performance has improved over the years, especially at the mid-range distances.  
+
+
+## The Reign of Dustin Colquitt - The Pitch for Canton
+
+Now we'll look at how Dustin stacks up against the other NFL punters and show that he is not just elite, but he is the best punter of the 21st century.  These statistics are comparing performances from the 2000 to 2019 seasons and take into account any player that has made 10 or more punts.  We'll analyze Dustin's performance based on a variety of metrics to ensure that we view a full picture of his career.
+
+
+We've talked cumulative EPA for Dustin during his career, so let's look at how that compares to all punters.
+
+```{r}
+  df9 <- punt_info %>%
+  group_by(punter_player_name,game_date) %>%
+  summarise(game_epa= sum(epa,na.rm=T)) %>%
+  group_by(punter_player_name) %>%
+  mutate(number=1,game=cumsum(number),cum_epa=cumsum(game_epa),avg_epa = cum_epa/game) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "D.Colquitt" ~ "D",
+    T~"F"
+  )) %>%
+  group_by(punter_player_name,game) %>%
+  ungroup() 
+  
+  df9a <- df9 %>%
+    group_by(punter_player_name) %>%
+    filter(game_date ==max(game_date)) %>%
+    filter(game_date < as.Date("2019-05-01"))
+  
+  df9b <- df9 %>%
+    group_by(punter_player_name) %>%
+    filter(game_date ==max(game_date)) %>%
+    filter((game > 100 & cum_epa > 50) | (game > 160 & cum_epa <=50)) %>%
+    mutate(active = case_when(
+      game_date < as.Date("2019-05-01") ~ F,
+      T ~ T
+    ))
+  
+  
+  df10 <- df9 %>%
+    mutate(is_colquitt = case_when(
+      punter_player_name == "B.Colquitt" ~ "B",
+      T~is_colquitt
+    )) %>%
+    filter(is_colquitt != "F")
+
+ggplot() +
+  geom_point(data=df9a, aes(x=game,y=cum_epa),shape=13,size=2.5) +
+  geom_path(data=subset(df9,is_colquitt=="F"),aes(x=game, y = cum_epa, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  geom_path(data=subset(df9,is_colquitt=="D"),aes(x=game, y = cum_epa, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  scale_color_manual(breaks = c("F","D"),values = c("black","#e31837")) +
+  scale_size_manual(breaks =  c("F","D"),values = c(.5,2)) +
+  ggrepel::geom_text_repel(data=df9b, aes(x=game,y=cum_epa,label=punter_player_name,fontface=ifelse(active==T,"bold","plain"))) +
+  #facet_wrap(~name) +
+  theme_minimal() +
+  #scale_x_continuous(labels = c(17,max(df7$game)+17)) +
+  theme(
+    legend.position = "none"
+  ) +
+  labs(x = "Career Games", y = "Cumulative EPA", title="HoF Pitch #1: Dustin Has the 2nd Highest Cumulative EPA",
+       subtitle="Cumulative EPAs for all punters since 2000.",caption = "Active players in bold.")
+```
+Of all punters active from 2000 to now, only Johnny Hekker has a higher EPA.  
+
+This chart is interesting as it's a snapshot of the state of play of all punters.  Many punters had long careers while producing negative cumulative EPA; however, our active leaders are all in the positive values.  Look at those guys below 0 cumulative EPA at the ends of their careers... they played between 150-200 games but you could identify their EPA trajectory potentially around 50 games, maybe less.  This trend may suggest a rise in analytics based decision making for punters among NFL Teams.
+
+EPA is a good measure but may not tell the whole story.  Coverages, supporting personnel, muffs all have an impact on the EPA, so let's now look at punt placement.  Here we'll analyze the average yardline of the opposing team that each punter has kicked to throughout their career.  The lower the yardage the better as the return team will start their return from closer to their own endzone. 
+
+```{r}
+  df11 <- punt_info %>%
+  group_by(punter_player_name,game_date) %>%
+  summarise(game_yrd_100 = sum(punt_yard_100,na.rm=T), punt_per_game = n()) %>%
+  group_by(punter_player_name) %>%
+  mutate(number=1,game=cumsum(number),cum_yrd_100=cumsum(game_yrd_100),
+         cum_punts = cumsum(punt_per_game), avg_yrd_100 = cum_yrd_100/cum_punts) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "D.Colquitt" ~ "D",
+    T~"F"
+  )) %>%
+  group_by(punter_player_name,game) %>%
+  ungroup() %>%
+  filter(game > 50)
+  
+  df11a <- df11 %>%
+    group_by(punter_player_name) %>%
+    filter(game_date ==max(game_date)) %>%
+    filter(game_date < as.Date("2019-05-01"))
+  
+  df11b <- df11 %>%
+    group_by(punter_player_name) %>%
+    filter(game_date ==max(game_date)) %>%
+    filter(game > 175 | avg_yrd_100 < 20) %>%
+    mutate(active = case_when(
+      game_date < as.Date("2019-05-01") ~ F,
+      T ~ T
+    ))
+  
+ggplot() +
+  geom_point(data=df11a, aes(x=game,y=avg_yrd_100),shape=13,size=2.5) +
+  geom_path(data=subset(df11,is_colquitt=="F"),aes(x=game, y = avg_yrd_100, group = punter_player_name,color=is_colquitt,size=is_colquitt),
+            lineend = "square") +
+  geom_path(data=subset(df11,is_colquitt=="D"),aes(x=game, y = avg_yrd_100, group = punter_player_name,color=is_colquitt,size=is_colquitt),
+            lineend = "square") +
+  scale_color_manual(breaks = c("F","D"),values = c("black","#e31837")) +
+  scale_size_manual(breaks =  c("F","D"),values = c(.5,2)) +
+  ggrepel::geom_text_repel(data=df11b, aes(x=game,y=avg_yrd_100,label=punter_player_name,fontface=ifelse(active==T,"bold","plain"))) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  ) +
+  labs(y = "Avg Punt Yardline before Return", x = "Games", title="HoF Pitch #2: Dustin Has the 4th Lowest Average Yardage for Punts w/o a Return.",
+       subtitle="Cumulative Mean Yard Line for Punts with No Return
+       ",caption = "Bold Names are active players
+       Touchbacks counted as a punt to 20 Yards")
+```
+Here we can see that Dustin Colquitt is in the head of the pack.  Of active punters with greater than 100 games the only active player who has a lower average is Brett Kern.
+
+But punt location is not the end all for a punter.  If a punter sacrifices air time for distance the returner may have a better chance to break lose for large returns.  Our next metric looks specifically at this point to see what the average return yardages against our punters are through their careers.  Elite punters must combine distance, directional punting, and air time in such a way that forces a fair-catch, allows the ball to be downed, or provides enough time for the punting team to prevent the returner from breaking loose for major gains.
+
+```{r}
+return_prop <- punt_info %>%
+  group_by(punter_player_name) %>%
+  summarize(number = n(), avg_ret_yrds = mean(return_yards), game_date = max(game_date)) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "D.Colquitt" ~ "D",
+    T ~ "F"
+  ))
+
+df_rp_b <- return_prop %>%
+  group_by(punter_player_name) %>%
+  filter(number > 1000 | (number > 500 & avg_ret_yrds < 3) | 
+           (number > 250 & avg_ret_yrds < 2.5) | (avg_ret_yrds < 2)) %>%
+  mutate(active = case_when(
+    game_date < as.Date("2019-05-01") ~ F,
+    T ~ T
+  ))
+
+h <- ggplot(data=return_prop)
+
+h + geom_point(aes(x=number, y=avg_ret_yrds, color=is_colquitt, size=is_colquitt)) +
+  scale_color_manual(breaks = c("F","D"),values = c("black","#e31837")) +
+  scale_size_manual(breaks =  c("F","D"),values = c(1,5)) +
+  geom_hline(aes(yintercept = mean(return_prop$avg_ret_yrds)), linetype = 2, color = 'blue') +
+  geom_text(aes(x = 0, y = 3.85, label = 'Avg'), color = 'blue') +
+  ggrepel::geom_text_repel(data=df_rp_b, aes(x=number,y=avg_ret_yrds,label=punter_player_name,fontface=ifelse(active==T,"bold","plain"))) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  ) +
+  labs(x = 'Punts', y = 'Average Return Yards',title="HoF Pitch #3: Lowest Mean Return Yards for 1000+ Punters",
+       subtitle = 'Punts by Average Return')
+```
+Again, Dustin Colquitt is again the top performer for punters with greater than 1000 punts, and almost a yard below the NFL average.
+
+
+These metrics individually point to Dustin being a top tier punter.  But if we look at situational punting, we can see where Dustin truly excels.  Deep punts combined with short returns can be measured by finding the percentage of punts that pin the opposing team to within their 20 yard line.  This chart shows you where Dustin truly stands alone.
+
+```{r}
+df7 <- punt_info %>%
+  filter(punt_result != "Block") %>%
+  mutate(punt_result = case_when(
+    punt_result == "Touchback" ~ "Inside 20",
+    T ~ punt_result
+  )) %>%
+  group_by(punter_player_name,game_date,punt_result) %>%
+  summarise(punts= n()) %>%
+  pivot_wider(names_from = punt_result, values_from = punts,values_fill = list(punts=0)) %>%
+  group_by(punter_player_name) %>%
+  mutate(number=1,game=cumsum(number),`Inside 20` = cumsum(`Inside 20`),`Outside 20`=cumsum(`Outside 20`)) %>%
+  pivot_longer(cols = c(`Inside 20`:`Outside 20`)) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "D.Colquitt" ~ "D",
+    T~"F"
+  )) %>%
+  group_by(punter_player_name,game) %>%
+  mutate(pct = value/sum(value)) %>%
+  ungroup() %>%
+  filter(game > 16) %>%
+  filter(name == "Inside 20") 
+
+df7b <- df7 %>%
+  group_by(punter_player_name) %>%
+  filter(game_date ==max(game_date)) %>%
+  filter(game_date < as.Date("2019-05-01"))
+
+df7a <- df7 %>%
+  group_by(punter_player_name) %>%
+  filter(game == max(game)) %>%
+  mutate(active = case_when(
+    game_date < as.Date("2019-05-01") ~ F,
+    T ~ T
+  )) %>%
+  filter(game >175)
+
+ggplot() +
+  geom_point(data=df7b, aes(x=game,y=pct),shape=13,size=2.5) +
+  geom_path(data=subset(df7,is_colquitt=="F"),aes(x=game, y = pct, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  geom_path(data=subset(df7,is_colquitt=="D"),aes(x=game, y = pct, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  ggrepel::geom_text_repel(data=df7a, aes(x=game,y=pct,label=punter_player_name,fontface=ifelse(active==T,"bold","plain")),nudge_y=.012,min.segment.length = 5) +
+  scale_color_manual(breaks = c("F","D"),values = c("black","#e31837")) +
+  scale_size_manual(breaks =  c("F","D"),values = c(.5,2)) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  ) +
+  labs(x = "Career Games", y = "% Punts At or Inside the 20", title="HoF Pitch #4: Elite Positional Punting",
+       subtitle="Percentage of punts at or beyond the opponents 20 through careers.",caption = "Chart begins after first full season.
+       Bold indicates active player")
+
+```
+Of all punters in the last 20 years with more than 50 games, Dustin Colquitt leads by almost 5% in pinning teams behind the 20 yard line.
+
+
+Finally, all of these statistics are meaningless if a player can't win when it matters.  For that, we'll look at the number of "high leverage" plays our punters have been asked to make and their effect on win percentages.  High leverage, as we're defining it, are when the punt squad is called during the last 2 minutes of regulation in a one score game. This is high leverage because a team with the lead needs to pin the opponents back to run out the clock and the team that's behind needs to prevent any more points being scored and get a defensive stop or turnover.
+
+Only a team's most clutch punter since 2000 (player with the most high leverage punts) is shown to reduce the noise.
+
+```{r}
+ggplot(df_leverage, aes(x=number, y = pct)) +
+  geom_point(data=subset(df_leverage,is_colquitt=="D"),color="#e31837",size=20,alpha=1,shape=1) +
+  geom_image(aes(image=team_logo),asp=1.2,size=.075) +
+  geom_text_repel(aes(label = punter_player_name),nudge_x = 1,nudge_y = .04,size=3,min.segment.length = 3) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(1)) +
+  theme(
+    legend.position = "none"
+  ) +
+  labs(title = "HoF Pitch #5: When the Pressure was On, Dustin Delivered for the Chiefs", subtitle = "Outcome with punts in the final two minutes of a one score game.",
+       x="Number of 'High Leverage' Punts", y = "Team Win Percentage w/ Punter",caption = "Displays each team's punter with the most high leverage opportunities since 2000.")
+
+```
+And again, Dustin Colquitt leads this frontier with 24 clutch kicks for an 89% win percentage for the Chiefs.
+
+In conclusion, Dustin Colquitt is an elite punter who, by the numbers, is still at the top of his game.  He leads the NFL in pinned opponents over time, is top 2 in overall EPA, and is a leader in all major punting metrics. The only comparisons that could be made are to other top tier punters like Shane Lechler, Johnny Hekker,  Brian Anger, or Andy Lee.  But either through his NFL longevity or consistent dominance across various metrics, Dustin is the superior punter.
+
+As he's now a free agent, a smart GM would look to pair the still dominant Dustin Colquitt with a competent "Game Manager" quarterback and a team that is built to win the field position battles, is a lethal combination.  Any team looking to provide instant value to their organization would be a fool to pass up on Dustin Colquitt.
+
+
+# B - B - B - Bonus Round!!
+
+## O Brother, Where Art Though?
+
+As we have a deep, personal understanding of sibling rivalry here at Data Brahs, we cannot finish our analysis of Dustin Colquitt's career without pitting him against his brother in a no holds barred analytics show-down!  Colquitt Bowl 15.0!  
+
+To kick us off, how bout how do the brothers punting styles compare based on distance? Who kicks the ball in the best spots?
+
+```{r}
+url.logo <- RCurl::getURL("https://raw.githubusercontent.com/statsbylopez/BlogPosts/master/nfl_teamlogos.csv")
+df.logos <- read.csv(text = url.logo,stringsAsFactors = F) %>%
+  filter(team_code == "KC")
+
+df.logos2 <- read.csv(text = url.logo)
+
+dfpunt <- data.frame(yval = c(87.5,62.5,37.5), xval = 'D.Colquitt',
+                     punt_dist=c("Long","Mid","Short"),text="Punted From Here")
+
+f <- ggplot(data = brah_info)
+
+f + geom_image(data = df.logos, aes(image=url,x =1.5,y=50),size=.1,inherit.aes = F,asp=5) +
+  scale_x_discrete(labels = brah_info$punter_player_name) +
+  scale_y_reverse(limits = c(100,0),breaks = c(0,20,50,80,100),
+                     minor_breaks = c(10,30,40,60,70,90), labels = c(0,20,50,20,0)) +
+  geom_rect(aes(xmin = 'B.Colquitt', xmax = 'D.Colquitt',
+                ymin = min_line, ymax = max_line), fill = 'yellow', alpha = .011) +
+  geom_boxplot(aes(x = punter_player_name, y = punt_yard_100,  #end_yard_100 for return performance
+                   fill = punter_player_name, color = punter_player_name), size = 1.1) +
+  facet_wrap(~punt_dist, ncol=1) +
+  scale_color_manual(breaks = c("D.Colquitt","B.Colquitt"),values = c( "#e31837","#002244")) +
+  scale_fill_manual(breaks = c("D.Colquitt","B.Colquitt"),values = c('#ffb612','#fb4f14')) +
+  theme(
+    panel.background = element_rect(fill="darkgreen"),
+    panel.grid.major.x = element_line(size=2, color="grey70"),
+    panel.grid.minor.x = element_line(size=1, color = "grey70"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    axis.text = element_blank(),
+    strip.background = element_blank(),
+    strip.text.x = element_blank(), 
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  geom_text(data=dfpunt, aes(x=xval,y=yval,label=text), nudge_x = -.5) +
+  coord_flip() +
+  labs(x = '', y = '', color="Punter", fill ='Punter',
+       title = 'Colquitt Bowl',
+       subtitle = 'Punt Distance based on Punting Position')
+```
+
+Things are looking pretty close!  Dustin has a slight advantage on mid to long range shots; Britton is more accurate in short distance scenarios. 
+
+Now we'll take a quick look at their EPAs.
+
+```{r}
+ggplot() +
+  geom_path(data=subset(df10,is_colquitt=="B"),
+            aes(x=game, y = cum_epa, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  geom_path(data=subset(df10,is_colquitt=="D"),
+            aes(x=game, y = cum_epa, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  scale_color_manual(breaks = c("B","D"),values = c("#002244","#e31837")) +
+  scale_size_manual(breaks =  c("B","D"),values = c(2,2)) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  ) +
+  labs(x = "Career Games", y = "Cumulative EPA", title="Colquitt Brother EPA Battle",
+       subtitle="The brothers came close to meeting at this statistic around 50 games.")
+
+```
+
+Their EPA growth rate is relatively close. With more games to his name Dustin leads overall, and has a slight lead in growth rate.  Dustin has taken a narrow lead at this point.  At Britton's point in his career, Dustin had almost 50 more EPA.
+
+Let's see how the brothers Colquitt match up in a our positional battle, percentages of punts within the 20.
+
+```{r}
+df7 <- punt_info %>%
+  filter(punt_result != "Block") %>%
+  mutate(punt_result = case_when(
+    punt_result == "Touchback" ~ "Inside 20",
+    T ~ punt_result
+  )) %>%
+  group_by(punter_player_name,game_date,punt_result) %>%
+  summarise(punts= n()) %>%
+  pivot_wider(names_from = punt_result, values_from = punts,values_fill = list(punts=0)) %>%
+  group_by(punter_player_name) %>%
+  mutate(number=1,game=cumsum(number),`Inside 20` = cumsum(`Inside 20`),`Outside 20`=cumsum(`Outside 20`)) %>%
+  pivot_longer(cols = c(`Inside 20`:`Outside 20`)) %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "D.Colquitt" ~ "D",
+    T~"F"
+  )) %>%
+  group_by(punter_player_name,game) %>%
+  mutate(pct = value/sum(value)) %>%
+  ungroup() %>%
+  filter(game > 16) %>%
+  filter(name == "Inside 20")
+
+df8 <- df7 %>%
+  mutate(is_colquitt = case_when(
+    punter_player_name == "B.Colquitt" ~ "B",
+    T~is_colquitt
+  )) %>%
+  filter(is_colquitt != "F")
+
+ggplot() +
+  geom_path(data=subset(df8,is_colquitt=="B"),
+            aes(x=game, y = pct, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  geom_path(data=subset(df8,is_colquitt=="D"),
+            aes(x=game, y = pct, group = punter_player_name,color=is_colquitt,size=is_colquitt),lineend = "square") +
+  scale_color_manual(breaks = c("B","D"),values = c("#002244","#e31837")) +
+  scale_size_manual(breaks =  c("B","D"),values = c(2,2)) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  ) +
+  labs(x = "Career Games", y = "% Punts At or Inside the 20", title="Colquitt Brother Positional Battle",
+       subtitle="The brothers came close to meeting at this statistic around 50 games.",
+       caption = "Chart begins after first full season.")
+
+```
+
+Here Dustin definitively takes the lead.  As we showed earlier, this is Dustin's signature statistic; his career percentage of punts within 20 yards is 12.5% higher than Britton's. (As the older brother, was there really any doubt as to who would come out on top? -M)
+
+So with this information, who get's bragging rights at the Colquitt household?  Dustin comes in as our Colquitt Bowl 15.0 victor, but Britton still edges him out in actual games having won 8 of their 14 previous match ups.  It's a hard call, but the real winner of this contest is...
+
+.
+
+.
+
+.
+
+Craig Colquitt!  
+
+The greatest metric of success in the NFL is Super Bowl victories.  The patriarch of the Colquitt family can not only boast of raising two Super Bowl champions, but can match both his sons combined two Super Bowl rings with his own.
+
+
+Thanks for reading.  The code for this project can be found in [this GitHub repo](https://github.com/DataBrahs/Too-Legit/).
+
+_**Special thanks to the following software packages for making this project possible.**_
+[nflfastR Package](https://mrcaseb.github.io/nflfastR/)
+[nflscrapR Package](https://github.com/maksimhorowitz/nflscrapR)
+[ggplot2](https://github.com/tidyverse/ggplot2)
+
+_**Thanks to the following for inspiration while doing up our first sports analytics post**_
+[Ben Baldwin](https://twitter.com/benbbaldwin)
+[mrcaseb](https://twitter.com/mrcaseb)
+[Michael Lopez](https://twitter.com/StatsbyLopez)
+[ArrowheadAnalytics](https://twitter.com/ChiefsAnalytics)
